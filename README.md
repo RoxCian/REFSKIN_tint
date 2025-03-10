@@ -14,9 +14,9 @@ This project uses code from [MDF-XL](https://github.com/SilverEzredes/MDF-XL) a 
 
 ### Usage
 
-- Copy refskin_tint.lua into reframework/autorun
+- Copy "reframework" folder into game directory
 
-- Rename your mesh and material which should use skin color to REFSKIN_*\<original material name>*
+- Rename your mesh and material which should use skin color to REFSKIN_*\<original material name or whatever you want>*
 
 - Export mesh and mdf
 
