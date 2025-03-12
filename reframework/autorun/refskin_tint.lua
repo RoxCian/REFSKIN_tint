@@ -2,14 +2,6 @@ local func = require("_SharedCore/Functions")
 
 local player_manager
 local npc_manager
-
-local function load_managers()
-    if player_manager == nil then player_manager = sdk.get_managed_singleton("app.PlayerManager") end
-    if npc_manager == nil then npc_manager = sdk.get_managed_singleton("app.NpcManager") end
-end
-local function init()
-    load_managers()
-end
 local players = {}
 local npcs_id = {}
 local frame_counter = 0
@@ -20,10 +12,31 @@ local is_loading_screen_updater = false
 local is_title_scene = false
 local is_hunter_only_scene = false
 local hunter_only_scene_key = nil
--- It has delay between updateEquipData executed and selected armor shown in equipment edit scene 
--- to make animation works and I cannot locate the function of show newly selected armor.
--- Make it work continuously for about 3-10 seconds for now.
 local continuously_exec_frame_count = -1
+
+log.debug("--REFSKIN_tint loaded--")
+
+local function load_managers()
+    if player_manager == nil then player_manager = sdk.get_managed_singleton("app.PlayerManager") end
+    if npc_manager == nil then npc_manager = sdk.get_managed_singleton("app.NpcManager") end
+end
+local function init()
+    load_managers()
+end
+
+local function debug_traverse_transform(transform, indent)
+    local game_object = transform:get_GameObject()
+    if game_object == nil then return false end
+    local name = game_object:get_Name()
+    if game_object then log.debug(string.rep("  ", indent) .. name .. ": " .. game_object:get_Tag()) end
+    local children = func.get_children(transform)
+    if children then
+        for _, child in ipairs(children) do
+            debug_traverse_transform(child, indent + 1)
+        end
+    end
+end
+
 local function dump_players()
     init()
     local c = 1
@@ -169,9 +182,32 @@ local function tint_skin_tone_hunter_object(hunter_object, skin_tone_vec)
     -- end
     tint_skin_tone_player_object(hunter_object, skin_tone_vec)
 end
+
+local function exec_title_scene()
+    local scene = func.get_CurrentScene()
+    local subtransform = scene:get_FirstTransform()
+    while subtransform do
+        local subtransform_object = subtransform:get_GameObject()
+        if subtransform_object ~= nil and subtransform_object:get_Name() == "ConstraintUniversalPositionRoot" then
+            local hunter_transform = subtransform:find("Pl000_00") or subtransform:find("Pl000_01")
+            if hunter_transform then
+                local hunter_object = hunter_transform:get_GameObject()
+                local skin_tone_vec = get_skin_tone_player_object(hunter_object)
+                if hunter_object then
+                    tint_skin_tone_hunter_object(hunter_object, skin_tone_vec)
+                else
+                    return false
+                end
+                return true
+            end
+        end
+        subtransform = subtransform:get_Next()
+    end
+    return false
+end
 local function exec_hunter_only_scene()
     local scene = func.get_CurrentScene()
-    local hunter_object = func.get_GameObjects(scene, { hunter_only_scene_key .. "_HunterXX", hunter_only_scene_key .. "_HunterXY" })[1]
+    local hunter_object = func.get_GameObjects(scene, { hunter_only_scene_key .. "_HunterXX", hunter_only_scene_key .. "_HunterXY", hunter_only_scene_key .. "_Hunter" })[1]
     local skin_tone_vec = get_skin_tone_player_object(hunter_object)
     if hunter_object then
         tint_skin_tone_hunter_object(hunter_object, skin_tone_vec)
@@ -182,9 +218,9 @@ local function exec_hunter_only_scene()
 end
 local function exec()
     if not is_dirty or is_loading then return false end
-    -- if is_title_scene then
-    --     if not exec_title_scene() then return end
-    if is_hunter_only_scene then
+    if is_title_scene and not is_hunter_only_scene then
+        if not exec_title_scene() then return false end
+    elseif is_hunter_only_scene then
         if not exec_hunter_only_scene() then return false end
     else
         if not dump_players() then return false end
@@ -200,6 +236,22 @@ local function exec()
     return true
 end
 
+local function enter_hunter_only_scene(scene_key, exec_asap)
+    if is_hunter_only_scene and hunter_only_scene_key == scene_key then return end
+    if is_title_scene then is_title_scene = false end
+    is_dirty = true
+    is_hunter_only_scene = true
+    hunter_only_scene_key = scene_key
+    if exec_asap then is_exec_asap = exec_asap end
+end
+local function leave_hunter_only_scene(scene_key, exec_asap)
+    if not is_hunter_only_scene or hunter_only_scene_key ~= scene_key then return end
+    is_dirty = true
+    is_hunter_only_scene = false
+    hunter_only_scene_key = nil
+    if exec_asap then is_exec_asap = exec_asap end
+end
+
 -- Hooks
 if reframework.get_game_name() == "mhwilds" then
     -- Loading screen
@@ -211,6 +263,7 @@ if reframework.get_game_name() == "mhwilds" then
             else
                 is_loading = false
                 is_loading_screen_updater = false
+                is_dirty = true
             end
         end,
         function(retval)
@@ -218,23 +271,23 @@ if reframework.get_game_name() == "mhwilds" then
         end
     )
     -- Title scene
-    sdk.hook(sdk.find_type_definition("app.TitleController"):get_method("doUpdate()"),
+    sdk.hook(sdk.find_type_definition("app.TitleFieldSceneActivator"):get_method("update()"),
         function(retval)
             return retval
         end,
         function(args)
-            if not is_title_scene then
-                is_title_scene = true
-                is_dirty = true
-                is_exec_asap = true
-            end
+            if is_title_scene then return end
+            is_title_scene = true
+            is_dirty = true
+            is_exec_asap = true
         end
     )
-    sdk.hook(sdk.find_type_definition("app.TitleController"):get_method("doDestroy()"),
+    sdk.hook(sdk.find_type_definition("app.TitleFieldSceneActivator"):get_method("onDestroy()"),
         function(retval)
             return retval
         end,
         function(args)
+            if not is_title_scene then return end
             is_title_scene = false
             is_dirty = true
         end
@@ -247,6 +300,9 @@ if reframework.get_game_name() == "mhwilds" then
         function(args)
             is_dirty = true
             is_exec_asap = true
+            -- It has delay between updateEquipData() executed and selected armor shown in equipment edit scene 
+            -- to make animation works and I cannot locate the function of show newly selected armor.
+            -- Make it work continuously for about 3-10 seconds for now.
             continuously_exec_frame_count = 300
         end
     )
@@ -293,12 +349,7 @@ if reframework.get_game_name() == "mhwilds" then
             return retval
         end,
         function(args)
-            if not is_hunter_only_scene then
-                is_hunter_only_scene = true
-                hunter_only_scene_key = "CharaMake"
-                is_dirty = true
-                is_exec_asap = true
-            end
+            enter_hunter_only_scene("CharaMake", true)
         end
     )
     sdk.hook(sdk.find_type_definition("app.CharaMakeSceneController"):get_method("onDestroy()"),
@@ -306,10 +357,7 @@ if reframework.get_game_name() == "mhwilds" then
             return retval
         end,
         function(args)
-            if hunter_only_scene_key ~= "CharaMake" then return end
-            is_hunter_only_scene = false
-            is_dirty = true
-            hunter_only_scene_key = nil
+            leave_hunter_only_scene("CharaMake", false)
         end
     )
     sdk.hook(sdk.find_type_definition("app.characteredit.basic.cSkin.Editor"):get_method("set_ColorU(System.Single)"),
@@ -334,10 +382,7 @@ if reframework.get_game_name() == "mhwilds" then
             return retval
         end,
         function(args)
-            is_hunter_only_scene = true
-            hunter_only_scene_key = "SaveSelect"
-            is_exec_asap = true
-            is_dirty = true
+            enter_hunter_only_scene("SaveSelect", false)
         end
     )
     sdk.hook(sdk.find_type_definition("app.SaveSelectSceneController"):get_method("update()"),
@@ -345,12 +390,7 @@ if reframework.get_game_name() == "mhwilds" then
             return retval
         end,
         function(args)
-            if not is_hunter_only_scene then
-                is_hunter_only_scene = true
-                hunter_only_scene_key = "SaveSelect"
-                is_dirty = true
-                is_exec_asap = true
-            end
+            enter_hunter_only_scene("SaveSelect", true)
         end
     )
     sdk.hook(sdk.find_type_definition("app.SaveSelectSceneController"):get_method("doOnDestroy()"),
@@ -358,39 +398,26 @@ if reframework.get_game_name() == "mhwilds" then
             return retval
         end,
         function(args)
-            if hunter_only_scene_key ~= "SaveSelect" then return end
-            is_hunter_only_scene = false
-            is_dirty = true
-            hunter_only_scene_key = nil
+            leave_hunter_only_scene("SaveSelect", false)
         end
     )
     -- Hunter guild card scene
     sdk.hook(sdk.find_type_definition("app.GuildCardSceneController"):get_method("start()"),
         function(args)
-            is_hunter_only_scene = true
-            hunter_only_scene_key = "GuildCard"
-            is_dirty = true
+            enter_hunter_only_scene("GuildCard", false)
         end
     )
     sdk.hook(sdk.find_type_definition("app.GuildCardSceneController"):get_method("update()"),
         function(args)
-            if not is_hunter_only_scene then
-                is_hunter_only_scene = true
-                hunter_only_scene_key = "GuildCard"
-                is_dirty = true
-                is_exec_asap = true
-            end
+            enter_hunter_only_scene("GuildCard", true)
         end
     )
     sdk.hook(sdk.find_type_definition("app.GuildCardSceneController"):get_method("exitEnd()"),
         function(args)
-            if hunter_only_scene_key ~= "GuildCard" then return end
-            is_hunter_only_scene = false
-            is_dirty = true
-            hunter_only_scene_key = nil
+            leave_hunter_only_scene("GuildCard", false)
         end
     )
-    -- NPC Manager
+    -- NPC manager
     sdk.hook(sdk.find_type_definition("app.NpcManager"):get_method("bindGameObject(via.GameObject, app.cNpcContextHolder)"),
         function(args)
             is_dirty = true
@@ -412,7 +439,7 @@ if reframework.get_game_name() == "mhwilds" then
             end
         end
     )
-    -- Player Manager
+    -- Player manager
     sdk.hook(sdk.find_type_definition("app.PlayerManager"):get_method("bindGameObject(via.GameObject, app.cPlayerContextHolder)"),
         function(args)
             is_dirty = true
@@ -428,9 +455,9 @@ end
 re.on_frame(function()
     if frame_counter == 0 or is_exec_asap or continuously_exec_frame_count >= 0 then exec() end
     frame_counter = math.fmod(frame_counter + 1, 16)
-    if (continuously_exec_frame_count >= 0) then 
+    if continuously_exec_frame_count >= 0 then 
         continuously_exec_frame_count = continuously_exec_frame_count - 1
-        is_dirty = continuously_exec_frame_count >= 0
+        if continuously_exec_frame_count >= 0 then is_dirty = true end
     end
     is_exec_asap = false
 end)
