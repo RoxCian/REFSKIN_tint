@@ -1,8 +1,14 @@
-local func = require("_SharedCore/Functions")
+-- Require and aliases
+local F = require("_SharedCore/Functions")
+local D = log.debug
+local H = sdk.hook
+local M = function(type_name, method_name) return sdk.find_type_definition(type_name):get_method(method_name) end
 
+-- Variables
 local player_manager
 local npc_manager
 local players = {}
+local npcs = {}
 local npcs_id = {}
 local frame_counter = 0
 local is_exec_asap = false
@@ -14,8 +20,24 @@ local is_hunter_only_scene = false
 local hunter_only_scene_key = nil
 local continuously_exec_frame_count = -1
 
-log.debug("--REFSKIN_tint loaded--")
+-- Entry
+if reframework.get_game_name() ~= "mhwilds" then
+    error("Not supported game \"" .. reframework.get_game_name() .. "\" (REFSKIN_tint)")
+    return
+end
+D("--REFSKIN_tint loaded--")
 
+-- Callbacks
+local function noop(v) return v end
+local function mark_dirty(exec_asap)
+    is_dirty = true
+    if exec_asap then is_exec_asap = true end
+end
+local function mark_dirty_hook(args)
+    is_dirty = true
+end
+
+-- Init
 local function load_managers()
     if player_manager == nil then player_manager = sdk.get_managed_singleton("app.PlayerManager") end
     if npc_manager == nil then npc_manager = sdk.get_managed_singleton("app.NpcManager") end
@@ -24,60 +46,84 @@ local function init()
     load_managers()
 end
 
-local function debug_traverse_transform(transform, indent)
-    local game_object = transform:get_GameObject()
-    if game_object == nil then return false end
-    local name = game_object:get_Name()
-    if game_object then log.debug(string.rep("  ", indent) .. name .. ": " .. game_object:get_Tag()) end
-    local children = func.get_children(transform)
-    if children then
-        for _, child in ipairs(children) do
-            debug_traverse_transform(child, indent + 1)
-        end
-    end
+-- Hunter only scene
+local function enter_hunter_only_scene(scene_key, exec_asap)
+    if is_hunter_only_scene and hunter_only_scene_key == scene_key then return end
+    if is_title_scene then is_title_scene = false end
+    is_hunter_only_scene = true
+    hunter_only_scene_key = scene_key
+    mark_dirty(exec_asap)
+end
+local function leave_hunter_only_scene(scene_key, exec_asap)
+    if not is_hunter_only_scene or hunter_only_scene_key ~= scene_key then return end
+    is_hunter_only_scene = false
+    hunter_only_scene_key = nil
+    mark_dirty(exec_asap)
 end
 
+-- Players capturing
+local function find_pl000(sub_id)
+    local name = "Pl000_" .. string.format("%02d", sub_id)
+    local scene = F.get_CurrentScene()
+    local transform = scene:get_FirstTransform()
+    while transform do
+        local game_object = transform:get_GameObject()
+        if game_object ~= nil and game_object:get_Name() == "ConstraintUniversalPositionRoot" then
+            local pl000_transform = transform:find(name)
+            if pl000_transform then
+                return pl000_transform:get_GameObject()
+            end
+        end
+        transform = transform:get_Next()
+    end
+end
 local function dump_players()
     init()
-    local c = 1
+    local p = 1
     
     if player_manager then
         local main_player = player_manager:getMasterPlayer()
         if not main_player or not main_player:get_CharacterValid() then return false end
         for i = 0, #player_manager._PlayerList - 1 do
-            local player = player_manager._PlayerList[i]:get_PlayerInfo() -- app.cPlayerManageInfo
+            local player = player_manager._PlayerList[i]:get_PlayerInfo()
             if player:get_CharacterValid() then
                 local player_object = player:get_Object()
                 if player_object then
-                    players[c] = player_object
-                    c = c + 1
+                    players[p] = player_object
+                    p = p + 1
                 end
             end
         end
     end
     if npc_manager then
         for _, npc_id in ipairs(npcs_id) do
-            local npc = npc_manager:findNpcInfo_NpcId(npc_id) -- app.cNpcManageInfo
+            local npc = npc_manager:findNpcInfo_NpcId(npc_id)
             if npc and npc:get_CharacterValid() then
                 local npc_object = npc:get_Object()
                 if npc_object then
-                    players[c] = npc_object
-                    c = c + 1
+                    players[p] = npc_object
+                    p = p + 1
                 end
             end
         end
     end
-    while #players > c do
-        table.remove(players, c + 1)
+    while #players > p do
+        table.remove(players, p + 1)
     end
     return true
 end
+local function is_npc(player_object)
+    local tag
+    local _, err = pcall(function() tag = player_object:get_Tag() end) 
+    return err == nil and tag and string.find(tag, "NPC")
+end
+
+-- Skin tone finding / tinting
 local function get_face(player_object)
-    local is_npc = string.find(player_object:get_Tag(), "NPC")
-    local transforms = player_object:get_Valid() and player_object:get_Transform()
-    if not transforms then return nil end
-    if is_npc then
-        local children = func.get_children(transforms)
+    local transform = player_object:get_Valid() and player_object:get_Transform()
+    if not transform then return nil end
+    if is_npc(player_object) then
+        local children = F.get_children(transform)
         if children then
             for i, child in pairs(children) do
                 local child_object = child:get_GameObject()
@@ -89,7 +135,7 @@ local function get_face(player_object)
         end
         return nil 
     else
-        local face_transform = transforms:find("Player_Face")
+        local face_transform = transform:find("Player_Face")
         return face_transform and face_transform:get_GameObject()
     end
 end
@@ -99,7 +145,7 @@ local function get_skin_tone_player_object(player_object)
     local face = get_face(player_object)
 
     if face then
-        local mesh = func.get_GameObjectComponent(face, "via.render.Mesh")
+        local mesh = F.get_GameObjectComponent(face, "via.render.Mesh")
         if mesh then
             local mat_count = mesh:get_MaterialNum()
             for j = 0, mat_count - 1 do
@@ -115,22 +161,13 @@ local function get_skin_tone_player_object(player_object)
                         end
                     end
                 end
-                -- if (mat_name == "ch00_5" or mat_name == "ch00_9") and mat_param then
-                --     -- for k = 0, mat_param - 1 do
-                --     --     local mat_param_name = mesh:getMaterialVariableName(j, k)
-                --     --     if mat_param_name == "AddColorUV" then
-                --     --         return mesh:getMaterialFloat4(j, k)
-                --     --     end
-                --     -- end
-                --     log.debug("bypass now")
-                -- end
             end
         end
     end
 end
 local function tint_skin_tone_game_object(game_object, skin_tone_vec)
     if skin_tone_vec == nil then return end
-    local mesh = func.get_GameObjectComponent(game_object, "via.render.Mesh")
+    local mesh = F.get_GameObjectComponent(game_object, "via.render.Mesh")
     
     if mesh then
         local mat_count = mesh:get_MaterialNum()
@@ -153,69 +190,44 @@ local function tint_skin_tone_game_object(game_object, skin_tone_vec)
 end
 local function tint_skin_tone_player_object(player_object, skin_tone_vec)
     if skin_tone_vec == nil then skin_tone_vec = get_skin_tone_player_object(player_object) end
-    if skin_tone_vec == nil then
-        log.debug("No skin tone applied")
-        return
-    end
-    local transforms = player_object:get_Valid() and player_object:get_Transform()
-    local children = transforms and func.get_children(transforms)
+    if skin_tone_vec == nil then return is_npc(player_object) end -- Return true for NPCs and false for players without skin tone specification.
+    local transform = player_object:get_Valid() and player_object:get_Transform()
+    local children = transform and F.get_children(transform)
     if children then
         for i, child in pairs(children) do
             local eq = child:get_GameObject()
-
             if eq and eq:get_Valid() then 
                 tint_skin_tone_game_object(eq, skin_tone_vec)
             end
         end
     end
-end
-local function tint_skin_tone(player, skin_tone_vec)
-    local player_object = player and player:get_Valid() and player:get_Object()
-    if player_object then tint_skin_tone_player_object(player_object, skin_tone_vec) end
-end
-local function tint_skin_tone_hunter_object(hunter_object, skin_tone_vec)
-    -- local chara = player:get_Character() -- app.HunterCharacter
-
-    -- for i = 1, 6 do
-    --     local game_object = chara:getParts(i - 1)
-    --     tint_skin_tone_game_object(game_object, skin_tone_vec)
-    -- end
-    tint_skin_tone_player_object(hunter_object, skin_tone_vec)
+    return true
 end
 
+-- Executor
 local function exec_title_scene()
-    local scene = func.get_CurrentScene()
-    local subtransform = scene:get_FirstTransform()
-    while subtransform do
-        local subtransform_object = subtransform:get_GameObject()
-        if subtransform_object ~= nil and subtransform_object:get_Name() == "ConstraintUniversalPositionRoot" then
-            local hunter_transform = subtransform:find("Pl000_00") or subtransform:find("Pl000_01")
-            if hunter_transform then
-                local hunter_object = hunter_transform:get_GameObject()
-                local skin_tone_vec = get_skin_tone_player_object(hunter_object)
-                if hunter_object then
-                    tint_skin_tone_hunter_object(hunter_object, skin_tone_vec)
-                else
-                    return false
-                end
-                return true
-            end
+    for i = 0, 1 do
+        local hunter_object = find_pl000(i)
+        if hunter_object then
+            return tint_skin_tone_player_object(hunter_object)
         end
-        subtransform = subtransform:get_Next()
     end
     return false
 end
 local function exec_hunter_only_scene()
-    local scene = func.get_CurrentScene()
-    local hunter_object = func.get_GameObjects(scene, { hunter_only_scene_key .. "_HunterXX", hunter_only_scene_key .. "_HunterXY", hunter_only_scene_key .. "_Hunter" })[1]
-    local skin_tone_vec = get_skin_tone_player_object(hunter_object)
+    local scene = F.get_CurrentScene()
+    local hunter_object = F.get_GameObjects(scene, { hunter_only_scene_key .. "_HunterXX", hunter_only_scene_key .. "_HunterXY", hunter_only_scene_key .. "_Hunter" })[1]
+    local result = false
     if hunter_object then
-        tint_skin_tone_hunter_object(hunter_object, skin_tone_vec)
-    else
-        return false
+        if tint_skin_tone_player_object(hunter_object) then result = true end
     end
-    return true
+    local pl000 = find_pl000(0)
+    if pl000 then
+        if tint_skin_tone_player_object(pl000) and result then result = true end
+    end
+    return result
 end
+
 local function exec()
     if not is_dirty or is_loading then return false end
     if is_title_scene and not is_hunter_only_scene then
@@ -223,241 +235,199 @@ local function exec()
     elseif is_hunter_only_scene then
         if not exec_hunter_only_scene() then return false end
     else
-        if not dump_players() then return false end
-        local failed = false
-        for i = 1, #players do
-            if players[i] then 
-                if not tint_skin_tone_player_object(players[i]) then failed = false end
+        local pl000_succeeded = false
+        local player_succeeded = false
+
+        local pl000 = find_pl000(1)
+        if pl000 then
+            pl000_succeeded = tint_skin_tone_player_object(pl000)
+        end
+
+        if dump_players() then
+            player_succeeded = true
+            for i = 1, #players do
+                if players[i] then 
+                    if not tint_skin_tone_player_object(players[i]) then player_succeeded = false end
+                end
             end
         end
-        if failed then return false end
+        if not pl000_succeeded and not player_succeeded then return false end
     end
     is_dirty = false
     return true
 end
 
-local function enter_hunter_only_scene(scene_key, exec_asap)
-    if is_hunter_only_scene and hunter_only_scene_key == scene_key then return end
-    if is_title_scene then is_title_scene = false end
-    is_dirty = true
-    is_hunter_only_scene = true
-    hunter_only_scene_key = scene_key
-    if exec_asap then is_exec_asap = exec_asap end
-end
-local function leave_hunter_only_scene(scene_key, exec_asap)
-    if not is_hunter_only_scene or hunter_only_scene_key ~= scene_key then return end
-    is_dirty = true
-    is_hunter_only_scene = false
-    hunter_only_scene_key = nil
-    if exec_asap then is_exec_asap = exec_asap end
-end
-
 -- Hooks
-if reframework.get_game_name() == "mhwilds" then
-    -- Loading screen
-    sdk.hook(sdk.find_type_definition("app.GUI010000"):get_method("guiLateUpdate()"),
-        function(args)
-            local GUI010000 = sdk.to_managed_object(args[2])
-            if GUI010000._Param:getValue() == 90.0 then
-                is_loading = true
-            else
-                is_loading = false
-                is_loading_screen_updater = false
-                is_dirty = true
-            end
-        end,
-        function(retval)
-            return retval
+-- -- Loading screen
+H(M("app.GUI010000", "guiLateUpdate()"),
+    function(args)
+        local GUI010000 = sdk.to_managed_object(args[2])
+        if GUI010000._Param:getValue() == 90.0 then
+            is_loading = true
+        else
+            if is_loading then is_dirty = true end
+            is_loading = false
         end
-    )
-    -- Title scene
-    sdk.hook(sdk.find_type_definition("app.TitleFieldSceneActivator"):get_method("update()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            if is_title_scene then return end
-            is_title_scene = true
-            is_dirty = true
-            is_exec_asap = true
+    end
+)
+-- -- Title scene
+H(M("app.TitleFieldSceneActivator", "update()"),
+    noop,
+    function(args)
+        if is_title_scene then return end
+        is_title_scene = true
+        mark_dirty(true)
+    end
+)
+H(M("app.TitleFieldSceneActivator", "onDestroy()"),
+    noop,
+    function(args)
+        if not is_title_scene then return end
+        is_title_scene = false
+        mark_dirty()
+    end
+)
+-- -- Equipment select scene (Gemma)
+H(M("app.GUI080000", "updateCurrentEquipData(app.EquipDef.EquipSet[], System.Boolean)"),
+    noop,
+    function(args)
+        mark_dirty()
+        -- It has delay between updateEquipData() executed and selected armor shown in equipment edit scene 
+        -- to make animation works and I cannot locate the function of show newly selected armor.
+        -- Make it work continuously for about 1-5 seconds for now.
+        continuously_exec_frame_count = 120
+    end
+)
+H(M("app.GUI080000", "updateCurrentEquipData(app.EquipDef.EquipSet, System.Boolean)"),
+    noop,
+    function(args)
+        mark_dirty()
+        continuously_exec_frame_count = 120
+    end
+)
+H(M("app.GUI080000", "onClose()"),
+    noop,
+    mark_dirty_hook
+)
+-- -- Equipment select scene (tent)
+H(M("app.GUI080001", "updateEquipParts(app.EquipDef.EQUIP_INDEX)"),
+    noop,
+    function(args)
+        mark_dirty()
+        continuously_exec_frame_count = 120
+    end
+)
+H(M("app.GUI080001", "onClose()"),
+    noop,
+    mark_dirty_hook
+)
+-- -- Equipment appearance scene (tent)
+H(M("app.GUI080200", "get_ID()"),
+    noop,
+    function(args)
+        mark_dirty()
+        continuously_exec_frame_count = 120
+    end
+)
+-- -- Hunter edit scene
+H(M("app.CharaMakeSceneController", "update()"),
+    noop,
+    function(args)
+        enter_hunter_only_scene("CharaMake", true)
+    end
+)
+H(M("app.CharaMakeSceneController", "onDestroy()"),
+    noop,
+    function(args)
+        leave_hunter_only_scene("CharaMake", false)
+    end
+)
+H(M("app.characteredit.basic.cSkin.Editor", "set_ColorU(System.Single)"),
+    function(args)
+        if is_hunter_only_scene and hunter_only_scene_key == "CharaMake" then 
+            mark_dirty(true)
         end
-    )
-    sdk.hook(sdk.find_type_definition("app.TitleFieldSceneActivator"):get_method("onDestroy()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            if not is_title_scene then return end
-            is_title_scene = false
-            is_dirty = true
+    end
+)
+H(M("app.characteredit.basic.cSkin.Editor", "set_ColorV(System.Single)"),
+    function(args)
+        if is_hunter_only_scene and hunter_only_scene_key == "CharaMake" then 
+            mark_dirty(true)
         end
-    )
-    -- Equipment select scene (Gemma)
-    sdk.hook(sdk.find_type_definition("app.GUI080000"):get_method("updateCurrentEquipData(app.EquipDef.EquipSet[], System.Boolean)"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            is_dirty = true
-            is_exec_asap = true
-            -- It has delay between updateEquipData() executed and selected armor shown in equipment edit scene 
-            -- to make animation works and I cannot locate the function of show newly selected armor.
-            -- Make it work continuously for about 3-10 seconds for now.
-            continuously_exec_frame_count = 300
+    end
+)
+-- -- Save data select scene
+H(M("app.SaveSelectSceneController", "doStart()"),
+    noop,
+    function(args)
+        enter_hunter_only_scene("SaveSelect", false)
+    end
+)
+H(M("app.SaveSelectSceneController", "update()"),
+    noop,
+    function(args)
+        enter_hunter_only_scene("SaveSelect", true)
+    end
+)
+H(M("app.SaveSelectSceneController", "doOnDestroy()"),
+    noop,
+    function(args)
+        leave_hunter_only_scene("SaveSelect", false)
+    end
+)
+-- -- Hunter guild card scene
+H(M("app.GuildCardSceneController", "start()"),
+    function(args)
+        enter_hunter_only_scene("GuildCard", false)
+    end
+)
+H(M("app.GuildCardSceneController", "update()"),
+    function(args)
+        enter_hunter_only_scene("GuildCard", true)
+    end
+)
+H(M("app.GuildCardSceneController", "exitEnd()"),
+    function(args)
+        leave_hunter_only_scene("GuildCard", false)
+    end
+)
+-- -- NPC manager
+H(M("app.NpcManager", "bindGameObject(via.GameObject, app.cNpcContextHolder)"),
+    function(args)
+        mark_dirty()
+        local npc_context_holder = sdk.to_managed_object(args[4])
+        local npc_id = sdk.to_managed_object(args[4]):get_Npc().NpcID
+        for _, _id in ipairs(npcs_id) do
+            if npc_id == _id then return end
         end
-    )
-    sdk.hook(sdk.find_type_definition("app.GUI080000"):get_method("updateCurrentEquipData(app.EquipDef.EquipSet, System.Boolean)"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            is_dirty = true
-            is_exec_asap = true
-            continuously_exec_frame_count = 300
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.GUI080000"):get_method("onClose()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            is_dirty = true
-        end
-    )
-    -- Equipment select scene (tent)
-    sdk.hook(sdk.find_type_definition("app.GUI080001"):get_method("updateEquipParts(app.EquipDef.EQUIP_INDEX)"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            is_dirty = true
-            is_exec_asap = true
-            continuously_exec_frame_count = 300
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.GUI080001"):get_method("onClose()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            is_dirty = true
-        end
-    )
-    -- Hunter edit scene
-    sdk.hook(sdk.find_type_definition("app.CharaMakeSceneController"):get_method("update()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            enter_hunter_only_scene("CharaMake", true)
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.CharaMakeSceneController"):get_method("onDestroy()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            leave_hunter_only_scene("CharaMake", false)
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.characteredit.basic.cSkin.Editor"):get_method("set_ColorU(System.Single)"),
-        function(args)
-            if is_hunter_only_scene and hunter_only_scene_key == "CharaMake" then 
-                is_dirty = true 
-                is_exec_asap = true
-            end
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.characteredit.basic.cSkin.Editor"):get_method("set_ColorV(System.Single)"),
-        function(args)
-            if is_hunter_only_scene and hunter_only_scene_key == "CharaMake" then 
-                is_dirty = true 
-                is_exec_asap = true
-            end
-        end
-    )
-    -- Save data select scene
-    sdk.hook(sdk.find_type_definition("app.SaveSelectSceneController"):get_method("doStart()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            enter_hunter_only_scene("SaveSelect", false)
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.SaveSelectSceneController"):get_method("update()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            enter_hunter_only_scene("SaveSelect", true)
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.SaveSelectSceneController"):get_method("doOnDestroy()"),
-        function(retval)
-            return retval
-        end,
-        function(args)
-            leave_hunter_only_scene("SaveSelect", false)
-        end
-    )
-    -- Hunter guild card scene
-    sdk.hook(sdk.find_type_definition("app.GuildCardSceneController"):get_method("start()"),
-        function(args)
-            enter_hunter_only_scene("GuildCard", false)
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.GuildCardSceneController"):get_method("update()"),
-        function(args)
-            enter_hunter_only_scene("GuildCard", true)
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.GuildCardSceneController"):get_method("exitEnd()"),
-        function(args)
-            leave_hunter_only_scene("GuildCard", false)
-        end
-    )
-    -- NPC manager
-    sdk.hook(sdk.find_type_definition("app.NpcManager"):get_method("bindGameObject(via.GameObject, app.cNpcContextHolder)"),
-        function(args)
-            is_dirty = true
-            local npc_context_holder = sdk.to_managed_object(args[4])
-            local npc_id = sdk.to_managed_object(args[4]):get_Npc().NpcID
-            for _, _id in ipairs(npcs_id) do
-                if npc_id == _id then return end
-            end
-            npcs_id[#npcs_id + 1] = npc_id
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.NpcManager"):get_method("unbindGameObject(via.GameObject, app.cNpcContextHolder)"),
-        function(args)
-            for _i, _id in ipairs(npcs_id) do
-                if npc_id == _id then
-                    table.remove(npcs_id, _i)
-                    return
-                end
+        npcs_id[#npcs_id + 1] = npc_id
+    end
+)
+H(M("app.NpcManager", "unbindGameObject(via.GameObject, app.cNpcContextHolder)"),
+    function(args)
+        for _i, _id in ipairs(npcs_id) do
+            if npc_id == _id then
+                table.remove(npcs_id, _i)
+                return
             end
         end
-    )
-    -- Player manager
-    sdk.hook(sdk.find_type_definition("app.PlayerManager"):get_method("bindGameObject(via.GameObject, app.cPlayerContextHolder)"),
-        function(args)
-            is_dirty = true
-        end
-    )
-    sdk.hook(sdk.find_type_definition("app.PlayerManager"):get_method("unbindGameObject(via.GameObject, app.cPlayerContextHolder)"),
-        function(args)
-            is_dirty = true
-        end
-    )
-end
+    end
+)
+-- -- Player manager
+H(M("app.PlayerManager", "bindGameObject(via.GameObject, app.cPlayerContextHolder)"),
+    mark_dirty_hook
+)
+H(M("app.PlayerManager", "unbindGameObject(via.GameObject, app.cPlayerContextHolder)"),
+    mark_dirty_hook
+)
 
+--
 re.on_frame(function()
-    if frame_counter == 0 or is_exec_asap or continuously_exec_frame_count >= 0 then exec() end
+    if frame_counter == 0 or is_exec_asap or (continuously_exec_frame_count >= 0 and math.fmod(continuously_exec_frame_count, 16) == 0) then exec() end
     frame_counter = math.fmod(frame_counter + 1, 16)
     if continuously_exec_frame_count >= 0 then 
         continuously_exec_frame_count = continuously_exec_frame_count - 1
-        if continuously_exec_frame_count >= 0 then is_dirty = true end
+        if continuously_exec_frame_count >= 0 then mark_dirty() end
     end
     is_exec_asap = false
 end)
