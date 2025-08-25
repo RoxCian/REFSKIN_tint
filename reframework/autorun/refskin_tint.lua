@@ -445,10 +445,11 @@ H(M("app.SaveSelectSceneController", "doStart()"),
         enter_hunter_only_scene("SaveSelect", false)
     end
 )
-H(M("app.SaveSelectSceneController", "displaySaveCharacter()"),
+H(M("app.mcSaveSelectHunterController", "afterRootSetup()"),
     noop,
     function(result)
         enter_hunter_only_scene("SaveSelect", false)
+        mark_dirty()
     end
 )
 H(M("app.SaveSelectSceneController", "doOnDestroy()"),
@@ -466,6 +467,7 @@ H(M("app.GuildCardSceneController", "start()"),
 H(M("app.GuildCardSceneController", "update()"),
     function(args)
         enter_hunter_only_scene("GuildCard", true)
+        mark_dirty(true)
     end
 )
 H(M("app.GuildCardSceneController", "exitEnd()"),
