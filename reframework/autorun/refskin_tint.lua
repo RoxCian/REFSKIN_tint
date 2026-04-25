@@ -23,7 +23,7 @@ local is_dirty_npc = false
 local is_loading = false
 local is_title_scene = false
 local is_hunter_only_scene = false
-local hunter_only_scene_key = nil
+local hunter_only_scene_keys = {} -- use set to avoid some maybe multithread issues?
 local continuously_exec_frame_count = -1
 local request_update = false
 local is_null_or_empty = M("System.String", "IsNullOrEmpty(System.String)")
@@ -55,17 +55,31 @@ local function init()
 end
 
 -- Hunter only scene
+local function is_in_hunter_only_scene(scene_key)
+    if not is_hunter_only_scene then return false end
+    return hunter_only_scene_keys[scene_key] or false
+end
 local function enter_hunter_only_scene(scene_key, exec_asap)
-    if is_hunter_only_scene then return end
+    if is_in_hunter_only_scene(scene_key) then return false end
+    D("ENTER SCENE " .. scene_key)
     is_hunter_only_scene = true
-    hunter_only_scene_key = scene_key
+    hunter_only_scene_keys[scene_key] = true
     mark_dirty(exec_asap)
+    return true
 end
 local function leave_hunter_only_scene(scene_key, exec_asap)
-    if not is_hunter_only_scene or hunter_only_scene_key ~= scene_key then return end
+    if not is_in_hunter_only_scene(scene_key) then return false end
+    hunter_only_scene_keys[scene_key] = nil
+    D("LEAVE SCENE " .. scene_key)
     is_hunter_only_scene = false
-    hunter_only_scene_key = nil
+    for _, el in pairs(hunter_only_scene_keys) do
+        if el then
+            is_hunter_only_scene = true
+            break
+        end
+    end
     mark_dirty(exec_asap)
+    return true
 end
 
 -- Find / apply skin tone
@@ -112,6 +126,7 @@ local function get_skin_tone(player_object, is_npc)
         end
     end
 end
+
 local function tint_skin_tone_game_object(game_object, skin_tone_vec)
     if skin_tone_vec == nil then return end
     local mesh = F.get_GameObjectComponent(game_object, "via.render.Mesh")
@@ -122,7 +137,7 @@ local function tint_skin_tone_game_object(game_object, skin_tone_vec)
         local mat_name = mesh:getMaterialName(j)
         local mat_param = mesh:getMaterialVariableNum(j)
 
-        if mat_name and mat_param and string.sub(mat_name, 1, 8) == "REFSKIN_" then
+        if mat_name and mat_param and string.find(mat_name, "REFSKIN") then
             for k = 0, mat_param - 1 do
                 local mat_param_name = mesh:getMaterialVariableName(j, k)
                 local mat_param_type = mesh:getMaterialVariableType(j, k)
@@ -144,6 +159,15 @@ local function tint_skin_tone(player_object, skin_tone_vec, is_npc)
             local eq = child:get_GameObject()
             if eq and eq:get_Valid() then 
                 tint_skin_tone_game_object(eq, skin_tone_vec)
+            end
+            local eqChildren = F.get_children(child)
+            if (eqChildren) then
+                for j, eqChild in pairs(eqChildren) do
+                    local eqPart = eqChild:get_GameObject()
+                    if eqPart and eqPart:get_Valid() then
+                        tint_skin_tone_game_object(eqPart, skin_tone_vec)
+                    end
+                end
             end
         end
     end
@@ -222,12 +246,17 @@ local function exec_title_scene()
 end
 local function exec_hunter_only_scene()
     local scene = F.get_CurrentScene()
-    local hunter_object = F.get_GameObjects(scene, { hunter_only_scene_key .. "_HunterXX", hunter_only_scene_key .. "_HunterXY" })[1]
-    if hunter_object == nil or not tint_skin_tone(hunter_object) then return false end
+    local hunter_object_tint_result = false
+    for k, v in pairs(hunter_only_scene_keys) do
+        if v then
+            local hunter_object = F.get_GameObjects(scene, { k .. "_HunterXX", k .. "_HunterXY" })[1]
+            if hunter_object ~= nil and tint_skin_tone(hunter_object) then hunter_object_tint_result = true end
+        end
+    end
+    if not hunter_object_tint_result then return false end
     local pl000 = find_pl000(0)
     return pl000 == nil or tint_skin_tone(pl000)
 end
-
 
 local function exec()
     if (not is_dirty and not is_dirty_npc) or is_loading then return false end
@@ -393,12 +422,6 @@ H(M("app.GUI080200HunterOverview", "updateValuesCore()"),
         request_update = true
     end
 )
-H(M("app.GUI080200HunterOverview", "applyMyset(via.gui.SelectItem)"),
-    noop,
-    function(result)
-        request_update = true
-    end
-)
 -- -- Hunter edit scene
 H(M("app.CharaMakeSceneController", "update()"),
     noop,
@@ -407,22 +430,21 @@ H(M("app.CharaMakeSceneController", "update()"),
     end
 )
 H(M("app.CharaMakeSceneController", "onDestroy()"),
-    noop,
-    function(result)
+    function(args)
         leave_hunter_only_scene("CharaMake", false)
     end
 )
 H(M("app.characteredit.protagonist.cUnderwear", "applyCore(app.characteredit.CharacterEditContext)"),
     noop,
     function(result)
-        if is_hunter_only_scene and hunter_only_scene_key == "CharaMake" then
+        if is_in_hunter_only_scene("CharaMake") then
             mark_dirty()
         end
     end
 )
 H(M("app.characteredit.basic.cSkin.Editor", "set_ColorU(System.Single)"),
     function(args)
-        if is_hunter_only_scene and hunter_only_scene_key == "CharaMake" and not is_dirty then
+        if is_in_hunter_only_scene("CharaMake") and not is_dirty then
             local skin_editor = sdk.to_managed_object(args[2])
             if sdk.to_float(args[3]) == skin_editor:get_ColorU() then return end
             mark_dirty(true)
@@ -431,7 +453,7 @@ H(M("app.characteredit.basic.cSkin.Editor", "set_ColorU(System.Single)"),
 )
 H(M("app.characteredit.basic.cSkin.Editor", "set_ColorV(System.Single)"),
     function(args)
-        if is_hunter_only_scene and hunter_only_scene_key == "CharaMake" and not is_dirty then
+        if is_in_hunter_only_scene("CharaMake") and not is_dirty then
             local skin_editor = sdk.to_managed_object(args[2])
             if sdk.to_float(args[3]) == skin_editor:get_ColorV() then return end
             mark_dirty(true)
@@ -440,16 +462,16 @@ H(M("app.characteredit.basic.cSkin.Editor", "set_ColorV(System.Single)"),
 )
 -- -- Save data select scene
 H(M("app.SaveSelectSceneController", "doStart()"),
-    noop,
+    -- noop,
     function(result)
         enter_hunter_only_scene("SaveSelect", false)
     end
 )
-H(M("app.mcSaveSelectHunterController", "afterRootSetup()"),
+H(M("app.mcSaveSelectHunterController", "updateMotion()"),
     noop,
     function(result)
         enter_hunter_only_scene("SaveSelect", false)
-        mark_dirty()
+        mark_dirty(true)
     end
 )
 H(M("app.SaveSelectSceneController", "doOnDestroy()"),
@@ -481,7 +503,7 @@ H(M("app.NpcManager", "bindGameObject(via.GameObject, app.cNpcContextHolder)"),
         is_dirty_npc = true
         local npc_context_holder = sdk.to_managed_object(args[4])
         local npc_id = npc_context_holder:get_Npc().NpcID
-        for _, _id in ipairs(npcs_id) do
+        for _, _id in pairs(npcs_id) do
             if npc_id == _id then return end
         end
         npcs_id[#npcs_id + 1] = npc_id

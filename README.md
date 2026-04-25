@@ -4,7 +4,7 @@ Under construction.
 
 A REFramework script to make your custom material can use skin color in Monster Hunter Wilds.
 
-This project uses code from [MDF-XL](https://github.com/SilverEzredes/MDF-XL) a lot.
+This project was inspired by [MDF-XL](https://github.com/SilverEzredes/MDF-XL).
 
 ### Requirements
 
