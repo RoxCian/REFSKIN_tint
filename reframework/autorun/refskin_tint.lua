@@ -27,11 +27,23 @@ local hunter_only_scene_keys = {} -- use set to avoid some maybe multithread iss
 local continuously_exec_frame_count = -1
 local request_update = false
 local is_null_or_empty = M("System.String", "IsNullOrEmpty(System.String)")
+local special_npcs = { "NPC101_00_006", "NPC102_00_007" }
+local special_npc_info = {
+    NPC101_00_006 = { name = "Fabius", default_x = 0.15, default_y = 0.76 },
+    NPC102_00_007 = { name = "Olivia", default_x = 0.97, default_y = 0.28 }
+}
+local special_npc_skin_tone_file = "REFSKIN_tint\\special_npc_skin_tone_config.json"
+local special_npc_skin_tones = json.load_file(special_npc_skin_tone_file) or {}
 
 -- Entry
 if reframework.get_game_name() ~= "mhwilds" then
     error("Not supported game \"" .. reframework.get_game_name() .. "\" (REFSKIN_tint)")
     return
+end
+for k, v in pairs(special_npc_info) do
+    if not special_npc_skin_tones[k] then
+        special_npc_skin_tones[k] = { x = v.default_x, y = v.default_y }
+    end
 end
 D("--REFSKIN_tint loaded--")
 
@@ -43,6 +55,23 @@ local function mark_dirty(exec_asap)
 end
 local function mark_dirty_hook(args)
     is_dirty = true
+end
+
+-- Utils
+local type_float4 = sdk.find_type_definition("via.Float4")
+local function new_float4(x, y, z, w)
+    local result = ValueType.new(type_float4) -- use ValueType instead of sdk.create_instance()
+    result:set_field("x", x)
+    result:set_field("y", y)
+    result:set_field("z", z)
+    result:set_field("w", w)
+    return result
+end
+local function skin_tone_tostring(float4)
+    return "(" .. float4.x .. ", " .. float4.y .. ")"
+end
+local function save_special_npc_skin_tone()
+    json.dump_file(special_npc_skin_tone_file, special_npc_skin_tones)
 end
 
 -- Init
@@ -61,7 +90,6 @@ local function is_in_hunter_only_scene(scene_key)
 end
 local function enter_hunter_only_scene(scene_key, exec_asap)
     if is_in_hunter_only_scene(scene_key) then return false end
-    D("ENTER SCENE " .. scene_key)
     is_hunter_only_scene = true
     hunter_only_scene_keys[scene_key] = true
     mark_dirty(exec_asap)
@@ -70,7 +98,6 @@ end
 local function leave_hunter_only_scene(scene_key, exec_asap)
     if not is_in_hunter_only_scene(scene_key) then return false end
     hunter_only_scene_keys[scene_key] = nil
-    D("LEAVE SCENE " .. scene_key)
     is_hunter_only_scene = false
     for _, el in pairs(hunter_only_scene_keys) do
         if el then
@@ -127,7 +154,7 @@ local function get_skin_tone(player_object, is_npc)
     end
 end
 
-local function tint_skin_tone_game_object(game_object, skin_tone_vec)
+local function tint_skin_tone_game_object(game_object, skin_tone_vec, retint)
     if skin_tone_vec == nil then return end
     local mesh = F.get_GameObjectComponent(game_object, "via.render.Mesh")
     
@@ -137,7 +164,7 @@ local function tint_skin_tone_game_object(game_object, skin_tone_vec)
         local mat_name = mesh:getMaterialName(j)
         local mat_param = mesh:getMaterialVariableNum(j)
 
-        if mat_name and mat_param and string.find(mat_name, "REFSKIN") then
+        if mat_name and mat_param and (string.find(mat_name, "REFSKIN") or (retint and mat_name == "skin")) then
             for k = 0, mat_param - 1 do
                 local mat_param_name = mesh:getMaterialVariableName(j, k)
                 local mat_param_type = mesh:getMaterialVariableType(j, k)
@@ -150,6 +177,20 @@ local function tint_skin_tone_game_object(game_object, skin_tone_vec)
 end
 local function tint_skin_tone(player_object, skin_tone_vec, is_npc)
     if player_object == nil then return true end
+    local special_npc = false
+    if is_npc then
+        local npc_name = player_object:get_Name()
+        if npc_name then
+            for k, v in pairs(special_npc_skin_tones) do
+                if string.sub(npc_name, 1, #k) == k then
+                    skin_tone_vec = new_float4(v.x, v.y, 0.0, 0.0)
+                    special_npc = true
+                    break
+                end
+            end
+        end
+    end
+
     if skin_tone_vec == nil then skin_tone_vec = get_skin_tone(player_object, is_npc) end
     if skin_tone_vec == nil then return is_npc end -- Return true for NPCs and false for players without skin tone specification.
     local transform = player_object:get_Valid() and player_object:get_Transform()
@@ -158,14 +199,14 @@ local function tint_skin_tone(player_object, skin_tone_vec, is_npc)
         for i, child in pairs(children) do
             local eq = child:get_GameObject()
             if eq and eq:get_Valid() then 
-                tint_skin_tone_game_object(eq, skin_tone_vec)
+                tint_skin_tone_game_object(eq, skin_tone_vec, special_npc)
             end
             local eqChildren = F.get_children(child)
-            if (eqChildren) then
+            if eqChildren then
                 for j, eqChild in pairs(eqChildren) do
                     local eqPart = eqChild:get_GameObject()
                     if eqPart and eqPart:get_Valid() then
-                        tint_skin_tone_game_object(eqPart, skin_tone_vec)
+                        tint_skin_tone_game_object(eqPart, skin_tone_vec, special_npc)
                     end
                 end
             end
@@ -181,7 +222,7 @@ local function find_pl000(sub_id)
     local transform = scene:get_FirstTransform()
     while transform do
         local game_object = transform:get_GameObject()
-        if game_object ~= nil and game_object:get_Name() == "ConstraintUniversalPositionRoot" then
+        if game_object and game_object:get_Name() == "ConstraintUniversalPositionRoot" then
             local pl000_transform = transform:find(name)
             if pl000_transform then
                 return pl000_transform:get_GameObject()
@@ -214,12 +255,17 @@ local function dump_players()
 end
 local function dump_npcs()
     init()
-    local p = #npcs
+    local p = #npcs + 1
     
     if npc_manager then
         for i = #npcs_id, 1, -1 do
             local npc_id = npcs_id[i]
-            local npc = npc_manager:findNpcInfo_NpcId(npc_id)
+            local npc
+            if type(npc_id) == "number" then 
+                npc = npc_manager:findNpcInfo_NpcId(npc_id)
+            else 
+                npc = sdk.find_type_definition("app.NpcManager"):get_method("findNpcInfo_NpcId(app.NpcDef.ID_Fixed)"):call(npc_manager, npc_id.fixed_id)
+            end
             if npc and npc:get_CharacterValid() then
                 local npc_object = npc:get_Object()
                 if npc_object then
@@ -489,7 +535,6 @@ H(M("app.GuildCardSceneController", "start()"),
 H(M("app.GuildCardSceneController", "update()"),
     function(args)
         enter_hunter_only_scene("GuildCard", true)
-        mark_dirty(true)
     end
 )
 H(M("app.GuildCardSceneController", "exitEnd()"),
@@ -515,6 +560,45 @@ H(M("app.PlayerManager", "bindGameObject(via.GameObject, app.cPlayerContextHolde
     mark_dirty_hook
 )
 
+-- Custom skin tone UI
+local ui_indent = 20
+local function draw_special_npcs_ui()
+    imgui.text("Special NPCs skin tone:")
+    imgui.indent(ui_indent)
+    imgui.text("Some of NPCs didn't include skin tone in their face mesh, and sometimes they may wear player armors. You can specify skin tone of those NPCs down below.")
+    imgui.text("Configurations will be auto-saved after value edited and be auto-loaded when the plugin is loading.")
+    for _, k in pairs(special_npcs) do
+        local info = special_npc_info[k]
+        if imgui.tree_node(info.name) then
+            imgui.indent(ui_indent)
+            local skin_tone = special_npc_skin_tones[k]
+            local changed, value = imgui.drag_float2("##" .. k, Vector2f.new(skin_tone.x, skin_tone.y), 0.01, 0.0, 1.0)
+            if changed then
+                special_npc_skin_tones[k] = { x = value.x, y = value.y }
+                local npc_fixed_id = sdk.find_type_definition("app.NpcDef.ID_Fixed"):get_field(k):get_data(nil)
+                npcs_id[#npcs_id + 1] = { fixed_id = npc_fixed_id }
+                save_special_npc_skin_tone()
+                is_dirty_npc = true
+            end
+            imgui.same_line()
+            if imgui.button("Reset##" .. k) then
+                special_npc_skin_tones[k] = { x = info.default_x, y = info.default_y }
+                save_special_npc_skin_tone()
+                is_dirty_npc = true
+            end
+            imgui.unindent(ui_indent)
+            imgui.tree_pop()
+        end
+    end
+end
+local function draw_ui()
+    if not imgui.tree_node("REFSKIN_tint") then return end
+    imgui.indent(ui_indent)
+    draw_special_npcs_ui()
+    imgui.unindent(ui_indent * 2)
+    imgui.tree_pop()
+end
+
 --
 re.on_frame(function()
     if frame_counter == 0 or is_exec_asap or continuously_exec_frame_count >= 0 then exec() end
@@ -526,3 +610,4 @@ re.on_frame(function()
     end
     is_exec_asap = false
 end)
+re.on_draw_ui(draw_ui)
